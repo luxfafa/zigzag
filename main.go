@@ -1,7 +1,11 @@
 package main
 
 import (
+	"archive/zip"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -26,7 +30,7 @@ var (
 )
 
 const (
-	novel_url = "http://www.janpn.com/book/145/145837/"
+	novel_url = "http://www.janpn.com/book/238/238381/"
 )
 
 // 爬取小说文章页并发放给通道
@@ -135,15 +139,13 @@ func main() {
 		}
 		wg.Wait()
 
-
 		fmt.Println("爬取完毕...正在写入")
-
 
 		rdsKeys := AkaRds.Keys("aka_*").Val()
 		rdsKeyLen := len(rdsKeys)
 		wg.Add(rdsKeyLen)
 		fPath,_ := os.Getwd()
-		fPath = fmt.Sprintf("%s%s",fPath,"/snake/novels/")
+		fPath = fmt.Sprintf("%s%s",fPath,"/zigzag/novels/noveltxt/")
 		for i := 0; i < rdsKeyLen; i++ {
 			go fromRdsToFile(fPath,rdsKeys[i])
 		}
@@ -152,6 +154,70 @@ func main() {
 
 	} else {
 		fmt.Println("未知错误")
+		os.Exit(2)
 	}
+	fPath,_ := os.Getwd()
+	zipPath := fPath+"/zigzag/novels/aka.zip"
+    zipAka,err := os.Create(zipPath)
+    if err!=nil {
+    	panic(err)
+	}
+	defer zipAka.Close()
+    zw := zip.NewWriter(zipAka)
+	defer func() {
+		// 检测一下是否成功关闭
+		if err := zw.Close(); err != nil {
+			log.Fatalln(err)
+		}
+	}()
+    txtPath := fPath+"/zigzag/novels/noveltxt"
+    readList,err := ioutil.ReadDir(txtPath) // readList []FileInfo
+	sayTrue(err)
+    for _,xInfo := range readList {
+		if !xInfo.IsDir() {
+			frName := txtPath+"/"+xInfo.Name()
+			fr, err := os.Open(frName)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+			fi, err := fr.Stat()
+			if err != nil {
+				fr.Close()
+				fmt.Println(err)
+				continue
+			}
+			fh, err := zip.FileInfoHeader(fi)
+			w, err := zw.CreateHeader(fh)
+			if err != nil {
+				fr.Close()
+				fmt.Println(err)
+				continue
+			}
+			_, err = io.Copy(w, fr)
+			if err != nil {
+				fr.Close()
+				fmt.Println(err)
+				continue
+			}
 
+			fr.Close()
+		}
+	}
+	fPathForDel,_ := os.Getwd()
+	fPathForDel = fmt.Sprintf("%s%s",fPathForDel,"/zigzag/novels/noveltxt/")
+	if errRemove:=os.Remove(fPathForDel);errRemove != nil {
+		fmt.Println(errRemove)
+
+	} else {
+		fmt.Println("压缩完毕")
+	}
 }
+
+func sayTrue(s error) {
+	if s != nil {
+		fmt.Println(s)
+	}
+}
+
+
