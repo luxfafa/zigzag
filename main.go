@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	novel_url = "http://www.janpn.com/book/15/15800/"
+	novel_url = "http://www.janpn.com/book/15/15800111/"
 )
 
 type NovelItem struct {
@@ -62,10 +62,9 @@ func GetNovel(url string) {
 	}
 
 	filter := gqAka.Find(".panel-chapterlist li")
-	resLen := filter.Length()
-	NovelLen = resLen
-	if resLen > 0 {
-		NovelCh = make(chan NovelItem, resLen)
+	NovelLen = filter.Length()
+	if NovelLen > 0 {
+		NovelCh = make(chan NovelItem, NovelLen)
 		NovelTitle = gqAka.Find("title").Text()
 		filter.Each(func(i int, s *goquery.Selection) {
 			aEle := s.Find("a")
@@ -160,56 +159,53 @@ func compressZip(readList []os.FileInfo, txtPath string, zw *zip.Writer) {
 }
 
 func main() {
+	GetNovel(novel_url) // 爬取目录页 goquery过滤 写入通道
+	if NovelLen < 1 {
+		fmt.Println("资源出现了问题")
+		os.Exit(2)
+	}
 	if bootRds := bootRds(); bootRds != nil {
 		panic(bootRds)
 	}
 	defer AkaRds.Close()
-	GetNovel(novel_url) // 爬取目录页 goquery过滤 写入通道
 	fPath, _ := os.Getwd()
-	fmt.Println(fPath)
-	if NovelLen > 0 {
-		fmt.Printf("获得了%d条小说章节 开始爬取\n", NovelLen)
-		wg.Add(NovelLen)
-		for i := 0; i < NovelLen; i++ {
-			go GetNovelTask()
-		}
-		wg.Wait()
+	fmt.Printf("获得了%d条小说章节 开始爬取\n", NovelLen)
+	wg.Add(NovelLen)
+	for i := 0; i < NovelLen; i++ {
+		go GetNovelTask()
+	}
+	wg.Wait()
 
-		fmt.Println("爬取完毕...正在写入")
+	fmt.Println("爬取完毕...正在写入")
 
-		rdsKeys := AkaRds.Keys("aka_*").Val()
-		rdsKeyLen := len(rdsKeys)
+	rdsKeys := AkaRds.Keys("aka_*").Val()
+	rdsKeyLen := len(rdsKeys)
 
-		if rdsKeyLen < 1 {
-			fmt.Println("DEBUG")
-			os.Exit(2)
-		}
-		wg.Add(rdsKeyLen)
-		txtApdFileName := fmt.Sprintf("%s%s", fPath, "/novels/noveltxt/")
-		//fmt.Println(txtApdFileName)
-		_, err := os.Stat(txtApdFileName)
-		if err != nil {
-			err := os.Mkdir(txtApdFileName, 0777)
-			if err != nil {
-				fmt.Println(err)
-			}
-		}
-		txtApdFileNameMix := fmt.Sprintf("%s%s.txt", txtApdFileName, NovelTitle)
-		txtApdFile, err := os.OpenFile(txtApdFileNameMix, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if rdsKeyLen < 1 {
+		fmt.Println("DEBUG")
+		os.Exit(2)
+	}
+	wg.Add(rdsKeyLen)
+	txtApdFileName := fmt.Sprintf("%s%s", fPath, "/novels/noveltxt/")
+	//fmt.Println(txtApdFileName)
+	_, err := os.Stat(txtApdFileName)
+	if err != nil {
+		err := os.Mkdir(txtApdFileName, 0777)
 		if err != nil {
 			fmt.Println(err)
 		}
-		defer txtApdFile.Close()
-		for i := 0; i < rdsKeyLen; i++ {
-			go fromRdsToFile(txtApdFile, rdsKeys[i])
-		}
-		wg.Wait()
-		fmt.Printf("执行完毕,共记录小说%d章\n", rdsKeyLen)
-
-	} else {
-		fmt.Println("未知错误")
-		os.Exit(2)
 	}
+	txtApdFileNameMix := fmt.Sprintf("%s%s.txt", txtApdFileName, NovelTitle)
+	txtApdFile, err := os.OpenFile(txtApdFileNameMix, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Println(err)
+	}
+	defer txtApdFile.Close()
+	for i := 0; i < rdsKeyLen; i++ {
+		go fromRdsToFile(txtApdFile, rdsKeys[i])
+	}
+	wg.Wait()
+	fmt.Printf("执行完毕,共记录小说%d章\n", rdsKeyLen)
 
 	if zipOK {
 		zipPath := fPath + "/novels/aka.zip"
