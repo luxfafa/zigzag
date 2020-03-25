@@ -6,18 +6,18 @@ import (
 )
 
 var (
-	NovelLen int
-	NovelCh  chan NovelItem
-	wg       sync.WaitGroup
+	NovelLen  int
+	novel_url string
+	NovelCh   chan NovelItem
+	wg        sync.WaitGroup
 	novelLock sync.Mutex
-	fafaLog       *os.File
+	fafaLog   *os.File
 
-	NovelTitle    string
-	NovelSavePath string
-	logPath       string
+	NovelTitle string
+	zigzagPath string
+	logPath    string
 
 	zipOK            = false
-	novel_url        = "http://www.janpn.com/book/238/238381/"
 	zaddForNovelsKey = "novels"
 )
 

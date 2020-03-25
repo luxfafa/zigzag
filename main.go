@@ -9,23 +9,43 @@ import (
 	akaLog "github.com/sirupsen/logrus"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 )
 
 func init() {
+	defer func() {
+		if commandErr := recover();commandErr!=nil {
+			switch commandErr.(type) {
+			case runtime.Error:
+				fmt.Printf("Args Error:%v\n",commandErr)
+			default:
+				fmt.Printf("Other Error:%v\n",commandErr)
+			}
+			os.Exit(2)
+		}
+	}()
+	novel_url = os.Args[1]
 
-	NovelPath, left := os.Getwd()
+	NovelPath, left := os.Getwd()  // 创建一些目录与文件
 	if left != nil {
 		panic(left)
 	}
-	NovelSavePath = NovelPath + "/novels"
-	logPath = NovelPath + "/zigzag.log"
-	fafaLog, left = os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	zigzagPath = NovelPath + "/observation"
+	logPath = zigzagPath + "/zigzag.log"
+	_,left = os.Stat(zigzagPath+"/")
+	if left != nil {  // 文件夹不存在就去创建
+		left = os.Mkdir(zigzagPath+"/",0777)
+		if left != nil {
+			panic(left)
+		}
+	}
+	fafaLog, left = os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)  // main()中延迟关闭
 	if left != nil {
 		panic(left)
 	}
-	//defer fafaLog.Close()
-	akaLog.SetFormatter(&akaLog.JSONFormatter{})
+
+	akaLog.SetFormatter(&akaLog.JSONFormatter{})  // logrus相关配置
 	akaLog.SetOutput(fafaLog)
 }
 
@@ -160,7 +180,7 @@ func main() {
 		os.Exit(2)
 	}
 	wg.Add(rdsKeyLen)
-	txtApdFileName := fmt.Sprintf("%s%s", NovelSavePath, "/noveltxt/")
+	txtApdFileName := fmt.Sprintf("%s%s", zigzagPath, "/novels/")
 	_, err = os.Stat(txtApdFileName)
 	if err != nil {
 		err := os.Mkdir(txtApdFileName, 0777)
@@ -181,12 +201,12 @@ func main() {
 	for _, novelMember := range rdsKeys {
 		go fromRdsToFile(txtApdFile, novelMember)
 	}
-	//boot.AkaRds.Del(zaddForNovelsKey)
+	boot.AkaRds.Del(zaddForNovelsKey)
 
 	wg.Wait()
 	akaLog.Infof("执行完毕,共记录小说%d章\n", rdsKeyLen)
 	if zipOK {
 		akaLog.Info("监测到需要压缩资源到ZIP...")
-		tools.AkaCompressZip(NovelSavePath) // 遍历文件夹下txt文件写入zip header
+		tools.AkaCompressZip(zigzagPath) // 遍历文件夹下txt文件写入zip header
 	}
 }
