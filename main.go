@@ -1,64 +1,52 @@
 package main
 
 import (
-	"archive/zip"
 	"fmt"
-	"io"
-	"io/ioutil"
-	"net/http"
-	"os"
-	"strconv"
-	"sync"
-
 	"github.com/PuerkitoBio/goquery"
 	"github.com/go-redis/redis"
+	"github.com/puthx/zigzag/boot"
+	"github.com/puthx/zigzag/tools"
+	akaLog "github.com/sirupsen/logrus"
+	"io"
+	"os"
+	"strconv"
 )
 
-const (
-	novel_url = "http://www.janpn.com/book/15/15800111/"
-)
+func init() {
 
-type NovelItem struct {
-	Title string
-	Url   string
-	Id    string
-}
-
-var (
-	NovelCh    chan NovelItem
-	NovelLen   int
-	wg         sync.WaitGroup
-	wn         sync.Once
-	AkaRds     *redis.Client
-	NovelTitle string
-	zipOK      = false
-)
-
-// connect redis
-func bootRds() error {
-	wn.Do(func() {
-		AkaRds = redis.NewClient(&redis.Options{
-			Addr:     "127.0.0.1:6379",
-			Password: "",
-			DB:       0,
-		})
-	})
-	return AkaRds.Ping().Err()
+	NovelPath, left := os.Getwd()
+	if left != nil {
+		panic(left)
+	}
+	NovelSavePath = NovelPath + "/novels"
+	logPath = NovelPath + "/zigzag.log"
+	fafaLog, left = os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	if left != nil {
+		panic(left)
+	}
+	//defer fafaLog.Close()
+	akaLog.SetFormatter(&akaLog.JSONFormatter{})
+	akaLog.SetOutput(fafaLog)
 }
 
 // 爬取小说文章页并发放给通道
 func GetNovel(url string) {
-	novel_response, left := http.Get(url)
-	if left != nil {
-		panic(left)
-	}
-	defer novel_response.Body.Close()
-	if novel_response.StatusCode != 200 {
-		panic(fmt.Sprintf("http status code is %d", novel_response.StatusCode))
+	novel_response, err := tools.GetNovelData(url)
+	if err != nil {
+		akaLog.WithFields(akaLog.Fields{
+			"err": err,
+			"url": url,
+		}).Fatal("爬取文章详情页错误")
+		os.Exit(2)
 	}
 	gqAka, left := goquery.NewDocumentFromReader(novel_response.Body)
+	defer novel_response.Body.Close()
 	if left != nil {
-		panic(left)
+		akaLog.WithFields(akaLog.Fields{
+			"err": left,
+			"url": url,
+		}).Fatal("GoQuery初始化文档错误")
+		os.Exit(2)
 	}
 
 	filter := gqAka.Find(".panel-chapterlist li")
@@ -83,24 +71,37 @@ func GetNovel(url string) {
 }
 
 // 爬取小说内容页并写入redis
-func DoTask(novel NovelItem) {
+func DoTask(novel NovelItem, NovelChapterKey string) {
 	defer wg.Done()
-	novel_response, left := http.Get(novel.Url)
-	if left != nil {
-		panic(left)
+	novelForSortScore := tools.UrlGetChapter(novel.Url)
+	if novelForSortScore < 1 {
+		akaLog.WithFields(akaLog.Fields{
+			"url": novel.Url,
+		}).Warn("分割url作为score失败")
+		return
 	}
-	defer novel_response.Body.Close()
-	if novel_response.StatusCode != 200 {
-		fmt.Printf("http status code is %d and url is %s\n", novel_response.StatusCode, novel.Url)
+	novel_response, err := tools.GetNovelData(novel.Url)
+	if err != nil {
+		akaLog.WithFields(akaLog.Fields{
+			"err": err,
+			"url": novel.Url,
+		}).Warn("爬取文章详情页错误")
 		return
 	}
 	gqAka, left := goquery.NewDocumentFromReader(novel_response.Body)
 	if left != nil {
-		panic(left)
+		akaLog.WithFields(akaLog.Fields{
+			"err": err,
+			"url": novel_url,
+		}).Warn("GoQuery初始化文档错误")
+		return
 	}
-	rdsKey := "aka_" + novel.Id
+	//novelsMemberKey := boot.GetNovelsChapterKey(novel.Id)
 	novelContent := gqAka.Find("#htmlContent").Text()
-	AkaRds.Set(rdsKey, novelContent, 0) // 存入redis string
+
+	//boot.AkaRds.Set(novelsChapterKey, novelContent, 0) // 存入redis string
+	boot.AkaRds.ZAdd(NovelChapterKey, redis.Z{Score: novelForSortScore, Member: novelContent})
+	//boot.AkaRds.Sort
 }
 
 // 产生两层goroutine 这是第二层 用于执行爬取文章详情页
@@ -109,7 +110,7 @@ func GetNovelTask() {
 	case novelItem := <-NovelCh:
 		if novelItem.Url != "" {
 			wg.Add(1)
-			go DoTask(novelItem)
+			go DoTask(novelItem, zaddForNovelsKey)
 		}
 	default:
 	}
@@ -117,113 +118,75 @@ func GetNovelTask() {
 }
 
 // exec read from redis and create txt file and delete redis key
-func fromRdsToFile(writerTxt io.Writer, akaKey string) {
-	novelContent := AkaRds.Get(akaKey).Val()
-	AkaRds.Del(akaKey)
+func fromRdsToFile(writerTxt io.Writer, novelContent string) {
 	defer wg.Done()
+	novelLock.Lock()
 	writerTxt.Write([]byte(novelContent))
-}
-
-func compressZip(readList []os.FileInfo, txtPath string, zw *zip.Writer) {
-	for _, xInfo := range readList {
-		if !xInfo.IsDir() {
-			frName := txtPath + "/" + xInfo.Name()
-			fr, err := os.Open(frName)
-			if err != nil {
-				fmt.Println(err)
-				continue
-			}
-			fi, err := fr.Stat()
-			if err != nil {
-				fr.Close()
-				fmt.Println(err)
-				continue
-			}
-			fh, err := zip.FileInfoHeader(fi)
-			w, err := zw.CreateHeader(fh)
-			if err != nil {
-				fr.Close()
-				fmt.Println(err)
-				continue
-			}
-			_, err = io.Copy(w, fr)
-			if err != nil {
-				fr.Close()
-				fmt.Println(err)
-				continue
-			}
-
-			fr.Close()
-		}
-	}
+	novelLock.Unlock()
 }
 
 func main() {
+	defer fafaLog.Close()
 	GetNovel(novel_url) // 爬取目录页 goquery过滤 写入通道
 	if NovelLen < 1 {
-		fmt.Println("资源出现了问题")
+		akaLog.WithFields(akaLog.Fields{
+			"data": NovelLen,
+		}).Fatal("资源出现了问题")
+
 		os.Exit(2)
 	}
-	if bootRds := bootRds(); bootRds != nil {
+	if bootRds := boot.BootRds(); bootRds != nil {
 		panic(bootRds)
 	}
-	defer AkaRds.Close()
-	fPath, _ := os.Getwd()
-	fmt.Printf("获得了%d条小说章节 开始爬取\n", NovelLen)
+	defer boot.AkaRds.Close()
+
+	akaLog.Infof("获得了%d条小说章节 开始爬取\n", NovelLen)
 	wg.Add(NovelLen)
 	for i := 0; i < NovelLen; i++ {
 		go GetNovelTask()
 	}
 	wg.Wait()
+	akaLog.Info("爬取完毕...正在写入")
 
-	fmt.Println("爬取完毕...正在写入")
-
-	rdsKeys := AkaRds.Keys("aka_*").Val()
-	rdsKeyLen := len(rdsKeys)
+	rdsKeys, err := boot.AkaRds.ZRange(zaddForNovelsKey, 1, -1).Result()
+	if err != nil {
+		akaLog.Fatal("获取zset失败", err)
+		os.Exit(2)
+	}
+	rdsKeyLen := len(rdsKeys) // 获取切片的长度
 
 	if rdsKeyLen < 1 {
-		fmt.Println("DEBUG")
+		akaLog.Fatalf("redis键数目不合法 数量为%d", rdsKeyLen)
 		os.Exit(2)
 	}
 	wg.Add(rdsKeyLen)
-	txtApdFileName := fmt.Sprintf("%s%s", fPath, "/novels/noveltxt/")
-	//fmt.Println(txtApdFileName)
-	_, err := os.Stat(txtApdFileName)
+	txtApdFileName := fmt.Sprintf("%s%s", NovelSavePath, "/noveltxt/")
+	_, err = os.Stat(txtApdFileName)
 	if err != nil {
 		err := os.Mkdir(txtApdFileName, 0777)
 		if err != nil {
-			fmt.Println(err)
+			akaLog.Fatal(err)
+			os.Exit(2)
 		}
 	}
 	txtApdFileNameMix := fmt.Sprintf("%s%s.txt", txtApdFileName, NovelTitle)
 	txtApdFile, err := os.OpenFile(txtApdFileNameMix, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
-		fmt.Println(err)
+		akaLog.Fatal(err)
+		os.Exit(2)
 	}
 	defer txtApdFile.Close()
-	for i := 0; i < rdsKeyLen; i++ {
-		go fromRdsToFile(txtApdFile, rdsKeys[i])
-	}
-	wg.Wait()
-	fmt.Printf("执行完毕,共记录小说%d章\n", rdsKeyLen)
 
+	//[]string range to boot groutine
+	for _, novelMember := range rdsKeys {
+		go fromRdsToFile(txtApdFile, novelMember)
+	}
+	//boot.AkaRds.Del(zaddForNovelsKey)
+
+	wg.Wait()
+	akaLog.Infof("执行完毕,共记录小说%d章\n", rdsKeyLen)
 	if zipOK {
-		zipPath := fPath + "/novels/aka.zip"
-		zipAka, err := os.Create(zipPath)
-		if err != nil {
-			panic(err)
-		}
-		defer zipAka.Close()
-		zw := zip.NewWriter(zipAka)
-		defer func() {
-			// 检测一下是否成功关闭
-			if err := zw.Close(); err != nil {
-				fmt.Println(err)
-			}
-		}()
-		txtPath := fPath + "/novels/noveltxt"
-		readList, err := ioutil.ReadDir(txtPath) // readList []FileInfo
-		compressZip(readList, txtPath, zw)       // 遍历文件夹下txt文件写入zip header
-		fmt.Println("压缩完毕")
+		akaLog.Info("监测到需要压缩资源到ZIP...")
+		tools.AkaCompressZip(NovelSavePath) // 遍历文件夹下txt文件写入zip header
 	}
 }
